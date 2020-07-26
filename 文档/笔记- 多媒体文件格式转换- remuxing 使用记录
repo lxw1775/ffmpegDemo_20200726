@@ -1,0 +1,84 @@
+笔记-多媒体文件格式转换（无编解码） - remuxing 使用记录
+	
+	
+步骤：	
+	input file    -->	demuxer    -->    encoded data packets    -->    muxer    -->    output file
+	输入文件			解封装器			  编码的数据包				 封装器			 输出文件			
+	
+	
+	涉及模块：
+	Demuxing-Module解封装模块
+		格式解析器读取媒体文件并将其拆分为数据块(数据包)。一个数据包，包含一个或多个属于单个基本流的编码帧。
+		在libavformat的API中，解封装过程由如下几步完成：
+			avformat_open_input()函数用于打开文件，
+			av_read_Frame()用于读取单个数据包，
+			avformat_close_input()来进行清理。
+	Muxing-Module封装模块
+		封装器以av数据包的形式封装编码的数据，并以指定的容器格式将其写入文件或其他输出字节流。
+		封装器的主要API函数有：
+			avformat_write_header（）用于写文件头，
+			av_write_frame() / av_interleaved_write_frame()用于写数据包，
+			av_write_trailer用于写文件尾完成文件写入。
+	在封装过程开始时，必须首先调用avformat_alloc_context()来创建muing上下文。然后调用方通过填充上下文中的各个字段来设置muxer：
+	必须将oformat 设置属性，以便决定使用什么封装器。
+	
+	
+	 一张图片一帧， 多个帧加一个头信息组成一个流， 多个流合成一个多媒体文件
+
+二 伪代码
+1. if ((ret = avformat_open_input(&ifmt_ctx, in_filename, 0, 0)) < 0) 	打开指定的文件(自动检测格式)并读取文件头，将存储在其中的信息导出到AVFormatContext*
+		AVFormatContext *ifmt_ctx;	
+		
+		1.2 使用AVDictionary对象 设置下文demuxer私有属性， avformat_open_input 第4个参数
+			AVDictionary *options = NULL;
+			av_dict_set(&options, "video_size", "640x480", 0);
+			av_dict_set(&options, "pixel_format", "rgb24", 0);
+			if (avformat_open_input(&s, url, NULL, &options) < 0)
+		
+		
+2. if ((ret = avformat_find_stream_info(ifmt_ctx, 0)) < 0) 有些格式没有文件头，或者没有在其中存储足够的信息，因此建议调用avformat_find_stream_info()函数，
+															该函数尝试读取和解码几个帧以查找丢失的信息。
+	// 对于无法识别的文件 如何优化识别??
+
+3. avformat_alloc_output_context2(&ofmt_ctx, NULL, NULL, out_filename); 在封装过程开始时，必须首先调用avformat_alloc_context()来创建muing上下文。
+	然后调用方通过填充上下文中的各个字段来设置muxer：
+	必须将oformat 设置属性，以便决定使用什么封装器。
+
+	
+4. for (i = 0; i < ifmt_ctx->nb_streams; i++) {
+        AVStream *in_stream = ifmt_ctx->streams[i];
+        AVCodecParameters *in_codecpar = in_stream->codecpar;
+		
+		out_stream = avformat_new_stream(ofmt_ctx, NULL);
+		ret = avcodec_parameters_copy(out_stream->codecpar, in_codecpar);	
+		out_stream->codecpar->codec_tag = 0;
+
+		封装初始化 使用avmat_new_stream()函数创建一个流。调用方应填写流编解码器参数信息，如编解码器类型、id和其他参数(例如宽度/高度、像素或采样格式等)。
+		流时基应该设置为调用方希望对此流使用的时间基
+
+   
+5.	ret = avformat_write_header(ofmt_ctx, NULL);	当完成设置muing上下文时，调用方必须调用avformat_write_header()来初始化muxer内部相关对象，并写文件头。
+	在这一步中，实际是否将任何内容写入io上下文取决于muxer，但必须始终调用此函数。任何muxer私有属性都必须在Options参数中传递给此函数。
+
+
+6. while(1)	{			从一个打开的文件读取信息
+	 av_read_frame(ifmt_ctx, &pkt);
+     in_stream  = ifmt_ctx->streams[pkt.stream_index];	
+	 
+	 从打开文件的AVFormatContext 读取数据是通过反复调用av_read_frame()来完成的。
+		如果每个调用成功，则将返回一个AVPacket(AV数据包) ，它有一个stream_index属性，该属性记录了一个含有编码数据的AVStream的索引值。
+		如果调用方希望解码数据，则可以将此数据包直接传递到libavcodec解码函数avcodec_send_packet()或avcodec_decode_subtitle 2()。
+
+	 /* copy packet */
+     pkt.pts = av_rescale_q_rnd(pkt.pts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
+     pkt.dts = av_rescale_q_rnd(pkt.dts, in_stream->time_base, out_stream->time_base, AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX);
+     pkt.duration = av_rescale_q(pkt.duration, in_stream->time_base, out_stream->time_base);
+	
+     ret = av_interleaved_write_frame(ofmt_ctx, &pkt); 反复将数据传递到到muxer
+	 传递到muxer的数据包上的时间信息必须和avstream的时间基一致。该时间基由muxer设置(在avformat_write_header()步骤中)，并且可能与调用方请求的时间基不同。
+	
+8.	av_write_trailer(ofmt_ctx);
+	一旦所有数据都写入，调用者必须调用av_write_trailer（）来释放所有packet缓冲区，并最终完成输出文件，
+	然后关闭io上下文（如果有的话），最后用avformat_free_context（）释放muxing上下文。
+ 	
+9.	avformat_close_input(&ifmt_ctx);
