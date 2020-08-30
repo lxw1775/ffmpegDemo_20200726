@@ -1,0 +1,260 @@
+
+《微软：DirectShow编程》
+http://blog.chinaunix.net/uid-26000296-id-3288017.html
+
+《微软：DirectShow开发指南》第三章 Programming DirectShow Applications
+	http://blog.chinaunix.net/uid-26000296-id-3291589.html
+
+如前所述的理想化的可重用代码对象一样，COM对象只需要知道它的名字即可。但是，它的名字并不是罗马字符串；它是名字是一个全球唯一标识，GUID，一个十六进制的字符串，格式为 32 bits–16 bits–16 bits–16 bits–44 bits。GUID保证了它的唯一性，因此每个COM对象也就有了一个唯一名字。幸运的是，并不需要记住这些没有意义的数字串。每个DS使用的COM对象都会要赋值一个C++定义名，被称为类ID。这个类ID是英文可读的并且也容易理解。例如，表示filter graph的COM对象的类ID为CLSID_FilterGraph, 它所表示GUID是e436ebb8-542f-11ce-9f53-0020af0ba770, 这个类ID提供了可实例化的COM对象的符号化名字。
+
+
+1. 在DS应用程序使用COM之前，需要先初始化(如果应用程序中有多个执行线程，那么每个线程都必须独立进行这个COM初始化)。可以使用下面的源代码来初始化。
+CoInitializeEx(NULL, COINIT_APARTMENTTHREADED) //Initializes COM
+
+初始化COM之后，就可以用想要的方式调用COM库。在结束应用程序的执行前，必须先关闭COM(如果COM关闭失败将会导致其它程序尝试使用COM服务执行出错)。释放COM服务，可以使用如下的代码：
+CoUninitialize(); // Releases COM
+
+2. 一旦初始化了DS中的COM服务，就可以通过COM调用来创建COM对象的实例。这些调用可以为应用程序创建各种对象，如filter什么的。任何DS应用程序的第一个COM调用通常是创建Filter graph Manager(是无论单个功能的filter ，还是完整的DS应用程序吗？)，一个用于处理filter graph的内部细节的对象(filter graph并不是对象本身，而是由多个紧密合作的COM对象的逻辑构成)。
+
+IGraphBuilder *graphBuilder = NULL; // Pointer to created object
+HRESULT hr = CoCreateInstance(CLSID_FilterGraph,
+                              NULL,
+                              CLSCTX_INPROC_SERVER,
+                              IID_IGraphBuilder,
+                              (void **)&pGraphBuilder);
+							  
+
+	CoCreateInstance有五个输入参数：
+		类ID:   CLSID_FilterGraph , 表示要创建Filter Graph Manager的COM对象。
+		NULL:  表示这个COM对象不是一个聚合对象，它是D	S应用程序的指定设置；
+		CLSCTX_INPROC_SERVER: 表示这个COM对象被进程内(即应用程序的)DLL加载，也是固定设置。
+		接口ID: IID_IGraphBuilder, 表示将返回对象的IGraphBuilder接口，它提供了创建filter graph的方法。
+		同时还需要这个对象的另一方法，IMediaControl，用来启动，停止，和暂停graph。
+		Void**： 这个函数用来返回一个指向对象的指针。
+
+	几乎每个COM调用都会有返回状态码，可以用SUCCEEDED和FAILED这两个宏来测试。COM调用的错误类型通常有程序的逻辑错误，对OS的请求失败，资源已被占用，或是请求未初始化的资源。
+
+pGraphBuilder->Release(); // Release the object
+pGraphBuilder = NULL;     // And set it to NULL
+
+当用完了一个COM接口，需要在适当的时候调用上述两个方法来释放。
+如果COM接口的释放失败，那么这个对象也不会被删除，这会导致内存失序并影响OS性能，还有可能导致即使程序结束了，OS还认为资源被使用。因此COM调用之后一定要进行释放。
+
+
+3. 当一个对象通过COM调用实例化后，DS应用程序通常还需要访问这个对象的其它接口。例如，如果应用程序需要完全控制filter graph的执行，就需要指向Filter Graph Manager的IMediaControl接口的指针。这是同一个对象在不同情况下的控制，但是每个接口都有唯一的方法来用于不同的任务。
+
+
+	IMediaControl *pMediaControl = NULL;           // Store pointer to interface
+	hr = pGraphBuilder->QueryInterface(IID_MediaControl, (void**)&pMediaControl);
+	为了获得对象的某个接口，需要给这个已创建的对象发送询问请求。
+
+	QureyInterface方法接收两个参数：
+	接口ID: IMediaControl, 要询问接口的GUID;
+	返回接口的存储位置的指针。
+	和返回的状态码。
+	
+	
+4. 对于绝大多数情况来说，通过调用CoCreateInstance来进行对象实例化是实现良好设计的C++对象的一种标准化的方式。当一个COM对象被实例化后，那么这个对象和其它的C++对象一样，在堆上进行了分配，当不再需要时就需要释放，并且它提供了可给OS中所有应用程序可用的属性和方法的可移植容器。每个COM对象的接口都是继承自IUnknown接口，除了QueryInterface外，它还提供了另外两个控制对象生命周期的方法：
+
+	AddRef方法：每当这个COM对象无论是通过CoCreateInstance的初始化调用还是通过QueryInterface的调用返 回任何它的接口给客户端(如调用它的应用程序)时，它都会调用这个方法来增加它的引用计数。
+
+	当客户端使用完了这个接口时，必须调用Release来释放，而COM对象的引用计数也会减一，当引用计数到零时，竟未着没有接口被引用了，这时对象才释放自身。这也是为什么在程序结束时未调用Release进行释放而导致内存泄露的原因。
+	
+5. DSRender: A DirectShow Media Player in C++
+	DSReader是一个很简单的DS应用程序。它的应用场景很简单：它将会开启一个用于打开文件的对话框，允许用户选择一个文件，然后尝试将这个文件渲染在用户的计算机上。也不用考虑媒体类型—它可以是一个AVI电影，一个WAV声音文件，Windows Media, 或是MP3音乐，或是一个MPEG电影。只要是DS filter能处理的文件格式，它都能对这个文件进行渲染。
+	
+
+	笔记-DSRender.cpp  介绍
+	前面已经介绍了一些COM基础，现在进入到mian函数。先是定义几个指向COM对象的变量，再通过调用基本的Windows函数GetMediaFileName获得文件名，再调用CoInitializeEx函数初始化COM。
+	
+	如果上述的操作返回成功。那么接着的是调用CoCreateInstance实例化Filter Graph Manager对象，并从这个调用中这个对象的IGraphBuilder接口—它提供了创建filter graph的方法。如果成功获得了IGraphBuilder接口(如果失败，则可能是DirectX或OS有问题)，再调用两次QueryInterface来返回Filter Graph Manager的另外两个接口。
+	第一次返回的是IMediaControl接口，它用来控制filter graph的执行状态。
+	第二次返回的是IMediaEvent接口，它提供filter graph将自己的状态发送信号给DS应用程序的方法。
+	在这种情况下，IMediaEvent可以用来追踪媒体文件的播放进程，它会暂停应用程序的执行直到播放结束。(对于OS高手来说：它可能是因为DS filter和DS应用程序在不同的线程中执行)
+	
+	很神奇的是，这里是只用一行代码就创建了整个filter graph。
+	当IGraphBuilder方法的RenderFile被调用(以媒体文件名为参数)时，Filter Graph Manager对象会检查媒体文件的类型，然后确认相应的filter集—源，转换，和渲染—它们都会被添加到filter graph，并彼此连接。
+	如果RenderFile返回成功，那么就表示DS找到了渲染源文件的filter路径。如果返回失败，则表示DS缺少播放这个媒体文件的filter,或是本身这个文件有问题。
+	
+	
+	当filter graph创建后，调用IMediaControl接口的Run方法开始执行filter graph。尽管filter graph开始执行了，但是Run方法会立即返回，因为数据流会从源filter开始就在另一个单独的线程中执行。媒体文件开始播放了。
+	如果媒体文件是一个电影，那么将会打开一个播放窗口。如果是一个声音文件，则不会打开播放窗口，但是会在扬声器中播放。Figure 3-1显示了AVI文件开播放。
+	
+	应用程序肯定需要暂停正在播放的媒体文件。
+	如果没有这个动作，那么应用程序在filter graph开始播放后就结束了，这肯定不行。这是为什么在播放时加入IMediaEvent接口的原因。
+	以INFINITE作参数调用它的WaitForCompletion方法，将会使应用程序等待直到Filter Graph Manager知道媒体文件播放完了。在实际的应用中，可能并不需要使用INFINITE作参数来调用WaitForCompletion方法，因为这会导致如果一些事件导致停止了媒体文件的播放，那么应用程序会一直等下去。在本例中它还是能工作的，在本书的其它示例将会展示IMediaEvent接口更有效的使用方法。
+	
+	在播放完成后，需要调用IMediaControl对象的Stop方法来终止filter graph的执行。这个动作是必须的。因为filter graph并不会媒体文件的播放完成而停止自身。
+	
+	
+	Saving a Filter Graph to a .GRF File
+	笔记-SaveGraphFile.cpp
+	在filter graph停止后，将立即调用局部域的SaveFilterGraph函数，它接受两个参数：指向IGraphBuilder接口的指针和一个文件名。这个函数调用会生成一个GraphEdit可见的filter graph。
+	
+	尽管用了一些前面没有讲的函数，但是这个函数还是很简单的。它先调用Windows函数StgCreateDocfile，打开输出文件，创建一个IStorage对象来表示文件。之后，再创建了一个IStream流对象。这个流用来提供输出文件数据路径。这个函数最有意思的是通过IGraphBuilder通过调用QueryInterface获得的Filter Graph Manager的IPersistStream接口，这个接口包含有能创建持久流对象的方法，这个对象可以写成文件并返回。当调用了IPersistStream的Save方法—以IStream对象的指针为参数—filter graph的数据结构将会被写到流中。
+	上述调用都成功后，则可以调用IStorage接口的Commit方法来将数据写到文件。此是，就针filter graph的快照输出到了文件。本程序使用的固定文件名。当DSRender结束后可以使用GraphEdit来查看这个文件，就可以看到DSRender创建的filter graph。这个filter graph是随着输入文件类型而不同的。Figure 3-2显示一个示例的filter graph。
+	
+DSRender是一个极其简陋的DS应用程序示例—没有装饰，没有额外的UI细节，仅仅只有媒体播。但是很多媒体文件都能在这个简单的应用程序中播放，因为DS的IGraphBuilder对象通过选择和连接合适的filter来创建一个功能化的filter graph处理了这些麻烦的工作。现在需要的是更往前走来自己创建filter graph处理这些烦琐的工作。
+6. DSBuild应用程序做了一些烦重的工作，包括有，创建了一个可以播放各种音频格式的音频播放器—几乎支持所有DS能支持的音频格式，包括AVI音轨和Windows Media电影。应用程序代码创建了一个Filter Graph Manager 对象并创建了两个filter：一个源filter(它指向文件)和一个音频渲染filter。然后，使用智能连接功能将源filter的输出pin,通过添加必要的转换filter连接到音频渲染filter的输入pin。当这个路径建立好后，这个filter graph就可以执行媒体文件的播放直到完成或停止。
+
+
+	DSBuild.cpp的源码包含有四个函数，有三个函数和DSRender.cpp中的几乎一样。另一个函数，GetPin的细节在“Locating Pins and GetPin’中详细分析。先的main函数开始。
+	Main函数的开始行和DSRender中的一样。先是通过COM调用实例化了一个Filter Graph Manager对象，然后通过QueryInterface的调用返回IMediaControl和IMediaEvent接口的指针，这是所有创建filter graph都必要的。在此时，调用了IGraphBuilder的一个新的方法，AddSourceFilter, 它以一个文件名为参数并返回一个指向IBaseFilter接口的指针，它被选择并实例化。IBaseFilter接口可以被所有DS filter使用。
+	
+	接着使用CoCreateInstance创建一个音频渲染filter，它的类ID值为CLSID_DSoundRender，它将返回这个对象的IBaseFilter 接口。当这个filter创建成功后，通过调用IGraphBuilder的AddFilter方法将它加入到filter graph中。AddFilter有两个参数：第一个是要加入filter graph的filter的IBaseFilter接口指针，第二个参数是这个filter的字符串名称。
+	
+	现在filter graph中有了两个filter：一个指向文件的源filter和一个音频输出filter。它们可能需要通过转换filter连接在一起。这个转换filter可能会根据输入源文件的媒体类型不同而不同。为了不用通过检查源文件本身来确定转换filter的类型，这里直接使用DS的智能连接。
+	
+	和DSRender一样，这个应用程序也是调用IMediaControl接口的Run方法来开始filter graph的执行，IMediaEvent的WaitForCompletion方法会暂停应用程序的执行直到媒体文件播放完毕。此时，调用Stop方法停止filter graph的执行。最后调用SaveGraphFile将filter graph写到文件，释放接口，应用程序结束。
+
+	即使使用了手动添加，filter graph的创建和维护也还不是很困难。然而，如果这个应用程序没有智能连接那难度就会显著增加。
+	
+笔记-GetPin	介绍
+	IBaseFilter有一个成员函数，EnumPins，它用于返回IEnumPins接口，这个接口可以用来迭代遍历filter的所有pin的列表。每个IEnumPin列表的元素包含有一个IPin对象。当遍历这个pin列表时，每个pin都会被IPin::QueryDirection方法询问。如果这的方向匹配所要的， 那么这个IPin接口指针就成了函数的返回值—应当注意的是，有些filter有多个输入pin和输出pin，并且这些pin有不同的媒体类型，因此有时并不知道返回的IPin会有所有的情况下都能用。例如，如果GetPin是在一个数字视频filter中被调用，期望的也是一个数字视频的输出pin，最后会发现无法连接到视频渲染，因为输出pin对应的是音频输出，无法和视频对接。这个函数没有做这种处理。
+	从DSRender和DSBuild可以后出，DS应用程序的创建并不是很难，DS对象的定义和接口也很容易使用。这些造就了DS的强大生命力。只用20来行的代码，就能创建一个完整的媒体播放器。这之后要做就只是添加用户接口。从这一点来说，图形用户接口的应用程序开发才是耗时耗力的。上面的两个例子都可以用在Windows应用程序中。
+	
+	
+《微软：DirectShow开发指南》第4章 Capturing Audio with DirectShow
+	https://blog.csdn.net/fireroll/article/details/7799464
+	
+	
+《微软：DirectShow开发指南》第5章 Capturing Audio and Video from a Webcam
+	http://blog.chinaunix.net/uid-26000296-id-3291866.html
+	
+7. 网络摄像头的应用无所不在。本例是将视频的每个单帧存成文件。
+	在DirectShow中，webcam表示为视频输入源filter，它能生成数据流并传输给DirectShow的filter graph。以前的摄像头可能只能采集视频，现在的则音视频都可以采集。
+	因此，DirectShow应用程序通常将webcam看作是两个独立的设备：视频捕捉组件和音频捕捉组件。这样的处理方式是明显不同于数字录像机的----它提供的是音频和视频数据合成了的单一流，而且这个流必须使用DirectShow的filter来进行去混合。尽管这样的做法会使webcam的工作稍稍复杂些，但是这种处理方式是很有普遍性。
+
+	本DirectShow应用DSWebcamCap是从Logitech webcam捕捉分立 的视频和音频输入存成文件。虽然本例使用了一个特定品牌的webcam，但是它可以稍做修改而用到别的地方。本应用程序是将合成流通过WM ASF Writer filter来写文件。这个上filter同时还使用了Windows Media Video codecs来压缩音频和视频流。编码后的数据写到ASF文件，以.WMA或.WMV为扩展名。WM ASF Writer可能根据需要来选择压缩等级。
+	
+	在COM初始化后，并不是按照惯例地生成Filter Graph Manager 对象的实例，而是调用CoCreateInstance函数来生成Capture Graph Builder对象的实例。
+	这个对象用来帮助构建捕捉音频和视频成文件的filter graph，但是它也可用来构建其它类型的graph。
+	当这个对象创建成功后，就可以调用 它的ICaptureGraphBuilder2::SetOutputFileName方法。这个方法将会以一个媒体类型指针为参数—本例中为MEDIASUBTYPE_Asf，表示ASF文件----并按后续参数创建一个输出文件。
+
+	SetOutputFileName的调用会创建一个WM ASF Writer filter的实例。pASFWriter是这个filter的IBaseFilter的接口指针，pSink是这个filter的IFileSinkFilter接口指针。有时即需要WM ASF Writer filter的指针，也需要它的IFileSinkFilter接口。例如，当要改变输出文件名时，就不需要通过SetOutputFileName来实现，而用IFileSinkFilter就可以了。**
+
+	当不需要创建AVI文件时—如在下章将要讨论的从camcorder获得是数字视频---就不用将指针MEDIASUBTYPE_Avi作为第一个参数传递，在这种情况下，返回的就不是WM ASF Writer filter指针，而是返回一个AVI Mux filter—它会将音频和视频流合成一个AVI格式的流。这时，还是可以同样使用File Writer renderer filter来将流写到文件。反之，
+	
+	在捕捉视频时，数据更趋向于不经压缩而直接存储。大多数的webcam可以输出YUV格式的视频(也有输出RGB的)，这就要求大量的带宽和有磁盘空间。这些数据压不压缩看你实际的使用环境。 
+	
+	通过调用SetOutputFileName创建的WM ASF Writer有很多的可选项，可以控制Windows Media compression algorithms如何来工作。这些值可以内部进行设置(具体可参见第15章)，也可以呈现在用户属性页上。很多DirectShow filter实现了这个属性页，通过ShowFilterPropertyPages函数可以实现它。
+	
+	ShowFilterPropertyPages函数使用了IBaseFilter的ISpecificPropertyPages接口，然而获得filter的名字。然后创建了一个IUnknown对象的接口。这些信息都传输给OleCreatePropertyFrame。它管理用户的属性用户页输入。当这个函数执行时，就可以看到这个属性页。
+	
+	OS将会处理用户输入的细节，当用户关闭对话框时，控制权将会返回给函数，它将会清除并退出。
+	属性页有时是不必要的，会搞乱用户，主要在给开发人员调试就可以啦。
+	用属性页来改变WM ASF Writer的设置是没有必要的，而且，实际上，最新版的Windows Media 9 Series Audio and Video codecs还不支持这种设置调整。
+	
+	当使用Capture Graph Builder创建了filter graph之后，就必须从Filter Graph Manager上获得IMediaControl接口来Run, pause和pause。
+	通过调用ICaptureGraphBuilder2::GetFilterGraph,就可以获得Filter Graph Manager的接口IGraphBuilder的指针。通过这个接口，就可以获得IMediaControl的接口。
+	
+	EnumerateAudioInputFilters函数和DSAudioCap中的相似，它用来创建GetAudioInputFilter。
+
+	接下来要做的和GetAudioInputFilter很相似，不同的是枚举类的GUID是VideoInputDeviceCategory。它将会列出所有有效的捕捉设备，并找到一个想要的加入到filter。
+
+	为了在监视视频的同时能将它写到文件，就需要在filter graph中添加一个video renderer。激活ICaptureGraphBuilder2的方法RenderStream，并将它连接到filter graph合适的pin就能实现这个功能。
+RenderStream处理所有filter创建并建立输入流到特定renderer的连接。
+	在本例中，需要提交一个预览给显示器。因此，传送指针PIN_CATEGORY_PREVIEW作为第一个参数，接着的参数是MEDIATYPE_Video—它用来指示感兴趣视频流。
+	然后传递两个NULL参数。第一个NULL是通知RenderStream，在本filter graph不需要中间filter。如果想加入一个filter，则将要插入的filter的参数作为参数传入。
+	第二个NULL参数RenderStream方法可以创建一个流的监视窗口，因此可以在写文件的同时监视。
+	RenderStream会确定输入filter和renderer filter之间的最佳路径。
+	
+	通常，调用RenderStream将会导致要添加一个额外的transform filter作为Smart Tees插入到filter graph。
+	Smart Tee能够接收一个流，然后转换成两个一样的，同步的流。
+	一个流可以作为捕捉流以给其它的filter作为Capture pin来使用，而另一个流则可以作为预览流给其它的filter作为Preview pin。
+
+	Smart Tee是怎么做到的呢？Smart Tee具有优先级，并且它不会造成捕捉流的丢帧。如果CPU在处理视频时过载了，那么Smart Tee能够侦测到这种过载并丢掉预览的帧，牺牲预览有利于捕捉的质量。使用Smart Tee将会看到一个不平稳的预览，但是有一个良好的捕捉文件。
+
+	为了filter graph的构建，需要再多两个RenderStream的调用。
+	第一个调用是建立视频捕捉filter到WM ASF Writer(由ICaptureGraphBuilder2对象创建)的连接，在本例中，PIN_CATEGORY_CAPTURE是传递给RenderStream的第一个参数。这个参数表示RenderStream，它应当连接是捕捉流，而不是预览流。如果需要的话，Smart Tee filter将会被插入。
+	第二个调用是建立音频流到WM ASF Writer的连接。
+	
+	本章主要讲述对摄像头的视频捕捉。虽然摄像头的图像品质很一般，但是的应用还是很广泛的。而DS完全只用几行代码就做进行图像捕捉。
+
+	尽管DSWebcamCap看起来很简单，但是它可以作为所有需要视频捕捉的基础，如音视频捕捉，视频监控，和数据压缩等。
+	
+《微软：DirectShow开发指南》第11章 Using the Sample Grabber Filter
+	https://blog.csdn.net/fireroll/article/details/8605985
+	
+8. 
+	尽管DS应用程序能从新建的转换filter中获益，但是它不好测试。通常程序员需要构建第二个filter来测试它的输出。DS的Sample Grabber (样本提取)filter可能解决这个问题，当然它的功能不止于此。
+
+	样本提取filter是一个标准的转换filter，它没有对媒体样本本身做任何处理。但是，它对所有的DS应用程序实例化了ISampleGrabber接口，
+	这个接口允许将应用程序在样本在经过Sample Grabber时“钩住(hook)媒体流。因为对Sample Grabber 在媒体流的安放位置几乎没有限制，所以Sample Grabber可以用来检查任何上游filter的输出。(它的位置不能是源filter, 也不能是渲染filter。然后，任何带有Sample Grabber的filter graph必须即有源，也有渲染filter) Sample Grabber允许DS应用程序不受限制地访问由filter graph生成的任何媒体格式的媒体样本流。
+
+	NOTE: 钩子(Hook),计算机用语，最早出现在操作系统中出现的钩子(Hook)概念。在Windows中，Hook是Windows消息处理机制的一个平台，应用程序可以在上面设置子程以监视指定窗口的某种消息，而且所监视的窗口可以是其他进程所创建的。当消息到达后，在目标窗口处理函数之前处理它。钩子机制允许应用程序截获处理window消息或特定事件。钩子实际上是一个处理消息的程序段，通过系统调用，把它挂入系统。每当特定的消息发出，在没有到达目的窗口前，钩子程序就先捕获该消息，亦即钩子函数先得到控制权。这时钩子函数即可以加工处理（改变）该消息，也可以不作处理而继续传递该消息，还可以强制结束消息的传递。
+
+	MS DirectX SDK实际上包含有两个显露filter graph的媒体样本给应用程序的filter:
+	  Sample Grabber，它是一个预先创建的DS filter；
+	  Grabber Sample， 一个MS VC++项目的例子。
+
+	尽管这两者本质上是同一个函数，但是它们还是一些接口上的差异，这种差异也会因为用了哪种接口而反映到应用程序实现上的不同。本章的前半部分，将介绍在一个DS应用程序中使用Sample Grabber。后半部分则是介绍Grabber Sample的创建和如何在应用程序中连接这个filter。
+
+	
+	Sample Grabber至少有两种方式来提供它强大的功能。
+	首先，Sample Grabber提供了一个对媒体流进行动态分析的机制，它可以窥视流经filter graph的媒体流。例如，如果想获得音轨的电平值 ，就可以使用Sample Grabber来跟踪样本中的最大音量。
+	其次，Sample Grabber允许样本数据的原地(即在pin的分配器中)转换。只要Sample Grabber发送给应用程序的数据以相同的媒体样本返回，则Sample Grabber并不关心应用程序怎么用这些数据。因此，应用程序可以关闭音频数据，换上一段测试用的视频流，或者如本章的柱状图检查例子中，执行对每个视频帧的检查，调整图像质量。通过它，可以不用创建filter而让应用程序实现所有的DS filter的功能。
+	
+	在下图中的柱状图应用程序的filter graph中，Sample Grabber就如同一个转换filter。如图11-1。
+	实际上，上图的filter graph图示说明并不完整。因为流经Sample Grabber的数据会上行结柱状图应用程序后会要返回。如图11-2所示：
+
+	每次Sample Grabber收到一个媒体样本后，它就发送信号给柱状图应用(当Sample Grabber注册后，就可以通过注册到柱状图应用程序的回调例程来实现)：样本已准备好。
+	在回调时，柱状图处理这个样本，完成后将控制权返回给Sample Grabber。然后媒体样本表示在Sample Grabber的输出pin上以给下游。
+	
+	柱状图应用程序转换输入的视频样本流。柱状图的意思是应用程序计数视频的每一帧的每个像素值的频率。这个应用程序用来跟踪给定帧中给定像素值的出现次数。
+	一旦这个信息收集后，依赖于代码的哪个部分被执行，它可以有下列三种方式的应用：
+	直方图拉伸：改变每帧中的每个像素值以使像素处理一个整体可能的范围。柱状图对图像亮度的改变有很明显的效果，它同样也被称为自动增益控制。
+	直方图均衡：它可以突出图像的细节，
+	对数拉伸：对帧中的每个像素进行对数操作。
+	上述的三个数学转换之一会被应用到视频的每一帧。视频经过Sample Grabber后，这个视频被编码并渲染到输出文件。AVI文件可以通过Windows Media Player来播放。
+	
+	
+	柱状图是一个基于控制台的应用程序，在它内部有一个固定编码文件名：C:\Histogram_Output.AVI
+	应用程序的简单的filter graph的创建，运行，和关闭都一个函数RunFile中：
+	尽管柱状图的源代码使用了Visual C++的ATL功能，但是它的代码还是和前面的有很多相像的。
+	
+	首先，Filter Graph Manager和Capture Graph Builde被实例化后初始化。
+	Capture Graph Builder的方法SetFileName创建输出AVI文件的文件名，然后使用AddSourceFilter来添加源文件。
+	接着添加DV编码filter。此时，实例化Sample Grabber filter并将其添加到filter graph, 并在连接其它的filter之前初始化
+	使用ATL指针，Sample Grabber filter对象会调用 QueryInterface来请求它的ISampleGrabber接口。
+	当获得了这个接口后，就可以进行Sample Grabber的配置。
+	首先，必须指定Sample Grabber的媒体类型，因此，AM_MEDIA_TYPE结构体会被实例化并对主类型赋值MEDIATYPE_Video，子类型赋值为MEDIASUBTYPE_UYVY。(如第10章所示，子类型表示流中的媒体样本为YUV格式，具体为UYVY)。
+	接着调用ISampleGrabber的SetMediaType方法建立Sample Grabber的媒体类型。Sample Grabber将会接受所有的媒体类型直到调用了SetMediaType，这时就只会接受SetMediaType中匹配的类型。
+	这个动作在将Sample Grabber和其它filter连接起来之前是很重要的，只有这样才能使其它 的filter和Sample Grabber连接时进行协商。
+	
+	Sample Grabber还要进行一些初始化。Sample Grabber有在它收到第一个媒体样本后停止filter graph执行的选项，当需要从文件中抓取静止帧时，这个功能很有用。
+	但是在现在的这个例子中将会破坏柱状图应用的操作。为了防止快照行为(因为本例需要的是filter graph的连续执行)，将ISampleGrabber的SetOneShot方法传递FALSE参数。
+	Sample Grabber在样本经过filter进同样也能在内部进行样本缓存；要关闭缓存可能可以通过SetBufferSamples传FALSE参数。
+	最后，柱状图应用程序通过调用SetCallback来初始化回调函数，这样，每次接收到一个样本后Sample Grabber就会调用这个函数。(传递给SetCallback的对象的格式将在下章中讨论)。当Sample Grabber初始化完后，就可以继续filter graph的构建。
+
+	当graph和RenderStream连接后，Sample Grabber会通过ISampleGrabber的方法GetConnectedMediaType来请求要处理媒体类型。
+	如是返回的子类型不是MEDIASUBTYPE_UYVY,则会因为状态图应用程序不能处理除UYVY外的视频帧而返回错误。这个函数也会检查格式类型FORMAT_VideoInfo，这是以VIDEOINFOHEADER定义的结构体。这个检查的原因是柱状图应用程序不能处理VIDEOINFOHEADER2格式(Sample Grabber filter也不能接受VIDEOINFOHEADER2这个格式). VIDEOINFOHEADER2和VIDEOINFOHEADER很相似，但是它添加了对场和宽高比的支持。
+	
+	全局的对象，g_stretch，实现了媒体样本的数学转换功能。(柱状图的三种功能可选)。g_stretch的SetFormat方法可以用来初始化高，宽和比特位深度。
+	
+	最后，调用IMediaFilter接口的SetSyncSource方法。这个调用是用来设置filter graph的参考时钟，它用来保持所有graph组件的同步并定义filter graph的表示时间。当传NULL参数时，表示SetSyncSource关闭filter graph的参考时钟，允许各个组件以自己的速率运行，这是本例不期望的，因为想要的是filter graph处理每个样本尽可能的快。如果激活了参考时钟，某些filter graph组件将会选择慢于同步。如果关闭参考时钟则不会发生这样的问题。
+	
+	到目前为止，就完成了所有的初始化，并请求Filter Graph Manager得到了IMediaControl和IMediaEvent接口。最后，运行filter graph直到完成。
+	
+Sample Grabber是通过回调对象初始化的，这个回调对象以钩子的方式在Sample Grabber和应用程序间工作。尽管Sample Grabber是被应用程序实例化的，但是它并不知道应用程序的任何事情；特别地，它也不知道应用程序是如何传输媒体样本的。应用程序和Sample Grabber之间的接口由回调对象GrabberCB管理，它的定义和实现如下：
+		
+	类GrabberCB继承自ISampleGrabberCB接口。这个接口定义了两个必须由回调对象实现的方法，GrabberCB::BufferCB和GrabberCB::SampleCB。
+	但是，Sample Grabber filter每次只会调用其中的一个回调方法，因此，只要在不用的调用中返回E_NOTIMPL即可。
+	GrabberCB::BufferCB方法： 可以从Sample Grabber中接收一个样本缓冲区，但是，在实例化时是关闭了Sample Grabber的样本缓存的，因此，这个方法返回错误代码E_NOTIMPL。
+	GrabberCB::QueryInterface：确保返回合适的接口。
+
+	GrabberCB::AddRef和GrabberCB::Release实现了假的引用计数。通常，COM要求对象保存引用计数并在引用计数为零时删除对象自身。在本例中，并不需要保留对象的引用计数，这意味着回调对象比DS filter有更大的范围，从而不会导致Sample Grabber还在使用中这个对象却被删除了。这也就是为什么grabberCallback对象要以全局变量实现。这个变量在应用程序执行期间内都在作用范围之内，当应用程序结束时会自动删除。
+	接着来看GrabberCB::SampleCB的实现，每当Sample Grabber filter有一个样本输出给应用程序时就会调用这个方法。这个方法和g_stretch通信，并传给它一个媒体样本的buffer指针(这个指针包含有原始样本数据)。当第一次调用这个方法时，m_fFirstSample标志置为真并调用ScanImage方法，它允许柱状图对象得到视频帧的细节信息。最后，这个方法调用柱状图对象的ConvertImage方法来执行buffer中的本地数据转换。
+
+	尽管这是一很简单的实现，但是它是所有在DS应用程序添加Sample Grabber filter必要的。有兴趣的部分在应用程序如何处理从Sample Grabber得到的媒体样本。
+
+	对从Sample Grabber得到的样本的处理限制很少。因为转换是在当前buffer中执行的，因此媒体格式转换是不允许的，其它的改变媒体类型的转换也是不允许的。如果Sample Grabber是将样本提交给视频渲染，filter graph的性能就会很重要
+	在柱状图应用程序中，柱状图图像处理对象CImagePointOp 使用三个数据转换方式：SetFormat, ScanImage, 和ConvertImage。因为ScanImage 和ConvertImage有三种可能的实现方式，这里使用默认的方式CEqualize作为其唯一实现：
+	
+	当filter graph的所有连接完成时RunFile就会调用方法CImageOp::SetFormat，此时，Sample Grabber将会知道柱状图对象的媒体类型(尽管Sample Grabber 已初始化了媒体类型和子类型，但是柱状图对象为了处理每个视频帧还需要更多的信息)。从VIDEOINFOHEADER参数，这个方法可以获得柱状图对象将要处理的视频帧的宽，高，stride和位深等信息。
+	当Sample Grabber从上游filter收到第一个媒体样本后，GrabberCB::SampleCB就会调用CEqualize::ScanImage。这个方法通过图像，逐像素地创建柱状图，它提取了亮度的最大和最小值。然后柱状图被归一化，并将这些值保存到数组中，交给CImageOp::ConvertImage使得。当CImageOp::ConvertImage被调用时，这个方法抽取旧的像素值，查找数据并插入新的像素值。
+	三种不同的柱状图实现是由ScanImage的不同实现来做到。
+	从应用程序员的角度来看，Grabber Sample的代码已完成，下面是Grabber Sample的一个相对实现。
+	
+ 
+	
